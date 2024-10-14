@@ -1,0 +1,499 @@
+---
+title: "Cyclistic bike-share analysis case study"
+author: "Elvin Suleymanov"
+date: "2024-10-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+```
+
+## Introduction
+
+Welcome to the Cyclistic bike-share analysis case study! This is one of the case studies in the Google Data Analytics Course. In this case study, I work for a fictional company Cyclistic. I have decided to use R for this analysis.
+
+## Scenario
+
+Cyclistic is a bike-share company. The marketing director believes the company’s future success depends on maximizing the number of annual memberships. I want to understand how casual riders and annual members use Cyclistic bikes differently. This is one of the questions in the **Ask** phase assigned to me.
+
+## Data preparation
+
+I am using the previous 12 months of Cyclistic’s historical trip data. There are in *.csv* file format. As a first step, I will combine all 12 months of data. In a code chunk below I set the path as a *(folder_path)* to the folder where I have stored *.csv* files.
+
+```{r set the path to my folder}
+folder_path <- "D:/data_practice/case_study_cyclistic/01_raw_data_cyclistic"
+```
+
+I use *list.files()* to get a list of all *.csv* files in the folder
+
+```{r get a list}
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+```
+
+Then I use *lapply()* to read all *.csv* files into a list of data frames.
+
+```{r read all the files}
+list_of_dataframe <- lapply(csv_files, read.csv)
+```
+
+Finally I use *rbind()* to combine al 12 files.
+
+```{r combine all}
+combined_dataframe <- do.call(rbind, list_of_dataframe)
+summary(combined_dataframe)
+```
+
+## Data cleaning
+
+After combining the data and getting the summary we see that there are **5 699 639** rows and **13** variables. I want to ensure that there are no duplicate rows.
+
+```{r delete duplicates}
+cyclistic_data <- combined_dataframe %>% distinct()
+```
+
+There are no duplicates. Now I check for missing values in each column.
+
+```{r check for missing values}
+colSums(is.na(cyclistic_data))
+```
+
+There are **7526** missing values in the *end_lat* and *end_lng* columns. Since I'm not planning to use the starting and ending coordinates in my analysis, I decided to delete not only the rows with missing values but also the following variables: *start_lat*, *start_lng*, *end_lat*, *end_lng*.
+
+```{r delete unnecessary variables}
+cyclistic_data <- cyclistic_data %>% select(-c(start_lat, start_lng, end_lat, end_lng))
+```
+
+Before checking for missing values I want to check for empty strings. We may have columns that didn't appear as a missing value because of the empty strings. The code below will show us if we have empty strings and how many are in each column.
+
+```{r check for empty strings}
+empty_string_check <- sapply(cyclistic_data, function(x) sum (x == ""))
+empty_string_check
+```
+
+We have way too many empty strings in both *start_station_id* and *end_station_id* and if we filter we see there are **472 808** rows where both of these two variables are missing. For now, I will leave these values without making any changes.
+
+```{r filter rows with ""}
+# Count rows where both 'start_station_id' and 'end_station_id' are empty strings
+sum_empty_both <- cyclistic_data %>%
+  filter(start_station_id == "" & end_station_id == "") %>%
+  nrow()
+
+# Display the result
+sum_empty_both
+
+```
+
+## Data structure
+
+Now we can inspect the structure of our data. With the *summary()* code below we can inspect our column names and variable types.
+
+```{r}
+summary(cyclistic_data)
+```
+
+In the first column, we have a unique character type ID for each ride, we can check if they are all the same length. The length has to be 16.
+
+```{r ride_id length}
+ride_id_length <- cyclistic_data %>% filter(nchar(ride_id) != 16)
+head(ride_id_length)                                            
+```
+
+If we check, we can see that there are only two types of values in the *rideable_type* and *member_casual* columns. But for easier manipulation, I want to change the variable types to the **factor**.
+
+```{r rideable_type variable type change}
+#check the variables first
+unique(cyclistic_data$rideable_type)
+unique(cyclistic_data$member_casual)
+
+#change the variable type
+cyclistic_data <- cyclistic_data %>% 
+  janitor::clean_names() %>% 
+  mutate(
+    rideable_type = as.factor(rideable_type),
+    member_casual = as.factor(member_casual)
+  )
+
+str(cyclistic_data)
+```
+
+Now I want to change **started_at** and **ended_at** columns to date-time format to do calculations. Since our data spans from September 2023 to August 2024, and the month column is based on the full month name, the default sorting will be alphabetical (January to December), which is not suitable for this specific time frame. To ensure the months are ordered correctly (starting from September 2023 and ending in August 2024), we can manually set the levels for the month column in the right order.
+
+```{r date-time format}
+month_levels <- c("September", "October", "November", "December", 
+                  "January", "February", "March", "April", 
+                  "May", "June", "July", "August")
+
+
+cyclistic_data <- cyclistic_data %>% mutate(
+  started_at = as.POSIXct(started_at, format = "%Y-%m-%d %H:%M:%S"),
+  ended_at = as.POSIXct(ended_at, format = "%Y-%m-%d %H:%M:%S"),
+  month = format(started_at, "%B"),
+  month = factor(month, levels = month_levels)
+)
+
+```
+
+Now I add columns that list the date, month, day, and year of each ride. This will allow us to aggregate ride data for each month, day, or year. Before completing these operations we could only aggregate at the ride level
+
+```{r add date month day and year columns}
+cyclistic_data <- cyclistic_data %>% 
+mutate(
+    ride_date = as.Date(started_at),              # Extract full date
+    ride_year = year(started_at),                 # Extract year
+    ride_day = day(started_at),                   # Extract day of the month
+    ride_weekday = wday(started_at, label = TRUE) # Extract day of the week
+  )
+```
+
+Now I can add some aggregations to our data. First I do aggregations to see ride length and add **ride_length** column to the data. After sorting by **ride_length** we can see some of them appear as negative values or zero.
+
+```{r ride length aggregation}
+cyclistic_data <- cyclistic_data %>% mutate(
+  ride_length = difftime(ended_at, started_at, units = "sec")
+)
+# Sort by ride_length
+cyclistic_data <- cyclistic_data %>% 
+  arrange(ride_length)
+head(cyclistic_data)
+```
+
+I want to delete rows with negative values, also the rows that appear as zero, this is because employees took bikes out of circulation for quality Control reasons.
+
+```{r delete negative values}
+cyclistic_data <- cyclistic_data %>%
+  filter(ride_length > 0)
+
+str(cyclistic_data)
+```
+
+I need to convert "ride_length" from factor to numeric so we can run calculations on the data
+
+```{r convert data type}
+cyclistic_data <- cyclistic_data %>% 
+  janitor::clean_names() %>% 
+   mutate(ride_length = as.numeric(ride_length)
+  )
+```
+
+After the last inspection, I decided to delete rows with empty strings at **start_station_id** and **end_station_id**. The **ride_length** is less than a minute in most of these rows.
+
+```{r delete empty strings}
+cyclistic_data <- cyclistic_data %>% 
+  filter(start_station_id != "",
+         end_station_id != "")
+```
+
+We still have a lot of rows with a ride length of less than one minute, since we're analyzing rider behavior, especially to compare members and casual riders, rides shorter than 1 minute might not provide meaningful insight. Very short rides might skew summary statistics like average ride length. Removing them could give a more realistic picture of typical rides, especially when comparing the habits of casual riders and members.
+
+```{r removing rides less than 60 sec}
+cyclistic_data <- cyclistic_data %>% 
+  filter(ride_length >= 60)
+```
+
+The last thing I want to change in our data is to change ride_length from seconds to minutes and round the value.
+
+```{r convert ride_length to minutes}
+cyclistic_data <- cyclistic_data %>% 
+  mutate(ride_length = round(ride_length / 60, 1))
+```
+
+## Data Analysis
+
+Now that the data is cleaned and tidy, we can start our analysis. My task is to give the difference of how the members and casual users use Cyclistic bikes differently.
+
+First, let's check how many rides were taken by each member type for the last 12 months. 63.4% of the rides were made by members.
+
+```{r ride count and percentage by member type}
+member_type_difference <- cyclistic_data %>%
+  group_by(member_casual) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = round(100 * count / sum(count), 1))
+
+#Let's use pie chart visualization for this. 
+ggplot(member_type_difference, aes(x = "", y = count, fill = member_casual)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = paste0(percentage, "%")), position = position_stack(vjust = 0.5)) +
+  labs(title = "Percentage of Rides by Member Type") +
+  theme_void()
+```
+
+Now let's see the difference in the ride length between these two by calculating total ride time (in hours), average, median, maximum, and minimum values.
+
+```{r difference in ride length}
+ride_length_summary <- cyclistic_data %>%
+  group_by(member_casual) %>%
+  summarise(
+    total_ride_length = sum(ride_length) / 60,
+    average_ride_length = mean(ride_length),
+    median_ride_length = median(ride_length),
+    min_ride_length = min(ride_length),
+    max_ride_length = max(ride_length)
+  )
+
+# Print the result to check
+print(ride_length_summary)
+
+```
+
+### Total Usage
+
+**Total Ride Length:** Comparing the total ride length can show which group (members or casual riders) contributes more overall to the system's usage. Casual riders contribute almost the same percentage to total ride length, they could represent a valuable target for marketing efforts to convert them into members.
+
+```{r bar chart for total usage}
+ggplot(ride_length_summary, aes(x = member_casual, fill = member_casual)) +
+  geom_bar(aes(y = total_ride_length), stat = "identity") +
+  labs(title = "Total Ride Length by Member Type", x = "Member Type", y = "Total Ride Length (hours)") +
+    theme_minimal()
+```
+
+### Ride Duration Patterns
+
+**Average Ride Length Comparison:** We can compare the average ride length between members and casual riders. Casual riders taking longer rides on average than members. This could indicate that casual riders use the service for leisure, while members may use it for commuting or shorter trips.
+
+```{r bar chart for avg ride length}
+ggplot(ride_length_summary, aes(x = member_casual, y = average_ride_length, fill = member_casual)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Average Ride Length by Member Type", x = "Member Type", y = "Average Ride Length (minutes)") +
+  theme_minimal()
+
+```
+
+### Day of the Week Patterns
+
+Are there significant differences in ride lengths on weekdays versus weekends for each group? Below is the visualization that shows us the difference between weekdays for each group. Before visualization, I converted *ride_weekday* into a factor to control the order of days. 
+
+```{r convert ride_weekdays}
+day_levels <- c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+cyclistic_data$ride_weekday <- factor(cyclistic_data$ride_weekday, levels = day_levels)
+```
+
+Group by member type and day of the week, and calculate the number of rides, mean and total ride length. 
+
+```{r grouping}
+weekday_summary <- cyclistic_data %>%
+  group_by(member_casual, ride_weekday) %>%
+  summarise(
+    ride_count = n(),
+    average_ride_length = mean(ride_length, na.rm = TRUE),
+    total_ride_length = sum(ride_length)
+  )
+```
+
+**Create a Line Chart with ggplot2**
+
+Casual riders prefer weekends while members use the service more on weekdays. This insight could suggest different user behaviors: casual riders might ride for leisure, while members use the service for work or daily activities.
+
+```{r line chart}
+ggplot(weekday_summary, aes(x = ride_weekday, y = ride_count, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.2) +      # Plot lines for each member type
+  geom_point(size = 3) +       # Add points for emphasis
+  labs(
+    title = "Number of Rides by Day of the Week for Members and Casual Riders",
+    x = "Day of the Week",
+    y = "Number of Rides",
+    color = "Member Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+Let's create line chart showing **average ride length per day** for each member type. 
+
+```{r avg ride length}
+ggplot(weekday_summary, aes(x = ride_weekday, y = average_ride_length, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.2) +        # Plot lines for each member type
+  geom_point(size = 3) +         # Add points for emphasis
+  labs(
+    title = "Average Ride Length by Day of the Week for Members and Casual Riders",
+    x = "Day of the Week",
+    y = "Average Ride Length (minutes)",
+    color = "Member Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+**Total ride length by day of the week**
+
+We know that casual riders cycle longer if look at the average ride length. But if we look at the total ride length for each day of the week, we'll see how the rides are different on weekdays and weekends. Casual riders start to ride more than members starting Friday while whole weekday members cycle longer. 
+
+```{r bar chart total ride length} 
+ggplot(weekday_summary, aes(x = ride_weekday, y = total_ride_length, fill = member_casual)) +
+  geom_bar(stat = "identity", position = "dodge") +  # 'dodge' to place bars side by side
+  labs(
+    title = "Total Ride Length by Day of the Week for Members and Casual Riders",
+    x = "Day of the Week",
+    y = "Total Ride Length (hours)",
+    fill = "Member Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+##Time of Year:
+
+**Seasonal Patterns:** 
+
+Comparing ride data across months could reveal seasonal trends. Let's find out if there any significant changes in ride behavior in winter vs. summer? Does one group contribute more during particular seasons?
+
+First, let's group by member type and months, and calculate the ride counts, average, and total ride length. 
+
+```{r summary for seasonal pattern}
+seasonal_summary <- cyclistic_data %>%
+  group_by(member_casual, month) %>%
+  summarise(
+    ride_count = n(),
+    average_ride_length = mean(ride_length, na.rm = TRUE),
+    total_ride_length = sum(ride_length) / 60
+  )
+```
+
+Now let's have our visualizations comparing **ride data across months** in the previous 12 months (September 2023 - April 2024)
+
+### Ride Counts 
+
+Members exhibit more consistent ride behavior throughout the year, although they still experience a significant seasonal dip during the winter. Casual riders heavily favor the summer months, with a sharp drop in usage during the colder months. Both groups experience their **lowest** ride counts in **January**, and their highest in **July and August**, aligning with warmer weather and possibly vacation times.
+
+```{r ride counts line chart}
+ggplot(seasonal_summary, aes(x = month, y = ride_count, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.2) +        # Create lines for each member type
+  geom_point(size = 3) +         # Add points for emphasis
+  labs(
+    title = "Ride Counts by Month of the Year for Members and Casual Riders",
+    x = "Month",
+    y = "Number of Rides",
+    color = "Member Type"
+  ) +
+  scale_x_discrete(limits = month_levels) +  # Ensure the correct month order
+  scale_y_continuous(labels = scales::comma) +  # Use comma format for large numbers
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels for better readability
+  )
+```
+
+### Average ride length
+
+Average ride length peaks from **April to May**, showing that casual riders take longer rides during the spring months, likely due to favorable weather conditions and possibly more leisure activities. The lowest average ride length is during **November to January**, coinciding with colder weather when casual riders tend to ride less frequently and for shorter distances.
+The average ride length for members remains quite consistent across the year. 
+Casual riders are more affected by seasonality in both ride counts and ride length, with longer rides in the spring and significantly shorter rides during the winter.
+Members maintain a more stable usage pattern and ride length throughout the year, reflecting more consistent service usage, likely for commuting or regular transportation purposes.
+The biggest difference between the two groups lies in the ride length variability: casual riders have large fluctuations in ride length depending on the season, while members’ ride lengths are relatively stable.
+
+```{r avg ride lengt by month}
+ggplot(seasonal_summary, aes(x = month, y = average_ride_length, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.2) +        # Create lines for each member type
+  geom_point(size = 3) +         # Add points for emphasis
+  labs(
+    title = "Average Ride Length by Month of the Year for Members and Casual Riders",
+    x = "Month",
+    y = "Average Ride Length (mintues)",
+    color = "Member Type"
+  ) +
+  scale_x_discrete(limits = month_levels) +  # Ensure the correct month order
+  scale_y_continuous(labels = scales::comma) +  # Use comma format for large numbers
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels for better readability
+  )
+```
+
+### Total ride length
+
+**Casual Riders:**
+
+Peak total ride length for casual riders is during the summer months, from June to August. During this period, they tend to take longer rides compared to members. The largest difference in total ride length between members and casual riders occurs during these summer months, where casual riders significantly outpace members in terms of how long they cycle in total. Casual riders’ total ride length drops off sharply in September, continuing to decline through the colder months.
+
+**Members:**
+
+Members have a more consistent total ride length throughout the seasons, with their peak period being slightly longer, from June to September. During the winter and spring months (October to April), members consistently record a higher total ride length compared to casual riders, suggesting more year-round, committed usage. While casual riders surpass members in total ride length during the summer, members generally cycle more during the other months of the year.
+
+**Closest Total Ride Length Months:**
+
+The closest months in terms of total ride length between the two groups are March, April. During these transition months, casual riders begin ramping up their activity, while members maintain a steady usage, leading to a smaller gap between the two groups.
+
+```{r total ride length line chart}
+ggplot(seasonal_summary, aes(x = month, y = total_ride_length, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.2) +        # Create lines for each member type
+  geom_point(size = 3) +         # Add points for emphasis
+  labs(
+    title = "Total Ride Length by Month of the Year for Members and Casual Riders",
+    x = "Month",
+    y = "Total Ride Length (hours)",
+    color = "Member Type"
+  ) +
+  scale_x_discrete(limits = month_levels) +  # Ensure the correct month order
+  scale_y_continuous(labels = scales::comma) +  # Use comma format for large numbers
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels for better readability
+  )
+```
+
+## Summary
+
+### Casual Riders:
+* Casual riders take approximately 1.8 times fewer rides than members, but their average ride length is about 2 times longer. Their total ride length throughout the year is similar to members.
+
+* There is a significant gap in ride counts between weekdays and weekends, with casual riders taking fewer rides on weekdays. However, on weekends, they accumulate more total ride length than members.
+
+* During weekdays, their total ride length is generally less than that of members, but Fridays show the closest balance between the two groups.
+
+* Average ride length is higher than that of members but decreases from October, reaching a low in winter months, before increasing again in spring, peaking between May and July.
+
+* Total ride length for casual riders is lower than members from October to April, but they experience a peak from June to August, where they exceed members, particularly in summer.
+
+### Members:
+
+* Members take more frequent but shorter rides compared to casual riders.
+
+* Although their average ride length is about 2x shorter, their total ride length throughout the year is very close to casual riders.
+
+* Members are more active on weekdays, with the number of rides decreasing slightly from Friday through the weekend.
+
+* Their total ride length is consistent across weekdays, reflecting regular commuting or daily use.
+
+* Members have a consistent average ride length throughout the year, with minor fluctuations.
+
+* During the winter months (October to April), their total ride length is higher than casual riders, but during the peak months (June to September), casual riders surpass them in total ride length.
+
+## Act
+
+* If casual riders are taking frequent long rides, on weekends and in warmer months this might be an opportunity to offer them membership plans tailored to their needs, potentially converting them into members.
+
+* Since casual riders are more active on weekends, offering weekend-only membership options could appeal to them. This could provide the convenience of unlimited rides on Saturdays and Sundays at a lower cost compared to a full membership.
+
+* Casual riders tend to ride more during warmer months (spring and summer), so offering seasonal memberships for these months could be tempting. This would allow them to benefit from membership perks without committing to a full year.
+
+* Casual riders have longer average ride lengths, so we could design membership tiers based on ride duration. For example, a plan that includes longer rides at a discounted rate might encourage them to become members.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
