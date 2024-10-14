@@ -1,5 +1,5 @@
 # Cyclistic-Bike-Share-Analysis
-[Google Data Analytics Professional Certificate Capstone Case Study](urhttps://www.coursera.org/professional-certificates/google-data-analyticsl)
+[Google Data Analytics Professional Certificate Capstone Case Study](https://www.coursera.org/professional-certificates/google-data-analyticsl)
 
 ## Introduction
 
