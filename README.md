@@ -1,6 +1,3 @@
-![09_avg_ride_length_day_of_the_week](https://github.com/user-attachments/assets/99c053fc-b117-416d-a5a3-e56d25da221a)# Cyclistic-Bike-Share-Analysis
-[Google Data Analytics Professional Certificate Capstone Case Study](https://www.coursera.org/learn/google-data-analytics-capstone)
-
 ## Introduction
 
 Welcome to the Cyclistic bike-share analysis case study! This is one of the case studies in the Google Data Analytics Course. In this case study, I work for a fictional company Cyclistic. I have decided to use R for this analysis.
